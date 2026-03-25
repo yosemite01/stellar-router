@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_double_initialize_fails() {
-        let (env, admin, client) = setup();
+        let (_env, admin, client) = setup();
         let result = client.try_initialize(&admin, &10);
         assert_eq!(result, Err(Ok(MulticallError::AlreadyInitialized)));
     }
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_set_max_batch_size() {
-        let (env, admin, client) = setup();
+        let (_env, admin, client) = setup();
         client.set_max_batch_size(&admin, &5);
         assert_eq!(client.max_batch_size(), 5);
     }
@@ -351,5 +351,106 @@ mod tests {
         let admin = Address::generate(&env);
         let result = client.try_initialize(&admin, &0);
         assert_eq!(result, Err(Ok(MulticallError::InvalidConfig)));
+    }
+
+    #[contract]
+    pub struct MockContract;
+
+    #[contractimpl]
+    impl MockContract {
+        pub fn success(_env: Env) {}
+        pub fn fail(_env: Env) {
+            panic!("intended failure");
+        }
+    }
+
+    #[test]
+    fn test_all_calls_succeed() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+        });
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+        });
+
+        let summary = client.execute_batch(&caller, &calls);
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.succeeded, 2);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(client.total_batches(), 1);
+    }
+
+    #[test]
+    fn test_optional_calls_fail_batch_completes() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        // Successful required call
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: true,
+        });
+        // Failing optional call
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: false,
+        });
+        // Successful optional call
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+        });
+
+        let summary = client.execute_batch(&caller, &calls);
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.succeeded, 2);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(client.total_batches(), 1);
+    }
+
+    #[test]
+    fn test_required_call_fails_aborts_batch() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        // Successful optional call
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+        });
+        // Failing required call
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: true,
+        });
+        // This should not even reach
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+        });
+
+        let result = client.try_execute_batch(&caller, &calls);
+        assert_eq!(result, Err(Ok(MulticallError::RequiredCallFailed)));
+        // Total batches should NOT increment if it failed
+        assert_eq!(client.total_batches(), 0);
     }
 }
