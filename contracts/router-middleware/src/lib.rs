@@ -416,4 +416,29 @@ mod tests {
         let result = client.try_configure_route(&attacker, &route, &10, &60, &true);
         assert_eq!(result, Err(Ok(MiddlewareError::Unauthorized)));
     }
+
+    #[test]
+    fn test_post_call_succeeds() {
+        let (env, _, client) = setup();
+        let caller = Address::generate(&env);
+        let route = String::from_str(&env, "oracle/get_price");
+        
+        // post_call should succeed with both true and false outcomes
+        client.post_call(&caller, &route, &true);
+        client.post_call(&caller, &route, &false);
+    }
+
+    #[test]
+    fn test_total_calls_not_incremented_on_rejected_pre_call() {
+        let (env, admin, client) = setup();
+        let route = String::from_str(&env, "oracle/get_price");
+        client.configure_route(&admin, &route, &1, &60, &true);
+        
+        let caller = Address::generate(&env);
+        client.pre_call(&caller, &route);                     // passes, total = 1
+        assert_eq!(client.total_calls(), 1);
+        
+        let _ = client.try_pre_call(&caller, &route);         // rejected (rate limit)
+        assert_eq!(client.total_calls(), 1);                  // must still be 1
+    }
 }
