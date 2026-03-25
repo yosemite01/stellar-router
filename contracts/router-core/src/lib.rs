@@ -541,4 +541,12 @@ mod tests {
         client.transfer_admin(&admin, &new_admin);
         assert_eq!(client.admin(), new_admin);
     }
+
+    #[test]
+    fn test_resolve_unknown_route_fails() {
+        let (env, _admin, client) = setup();
+        let name = String::from_str(&env, "unknown");
+        let result = client.try_resolve(&name);
+        assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+    }
 }
