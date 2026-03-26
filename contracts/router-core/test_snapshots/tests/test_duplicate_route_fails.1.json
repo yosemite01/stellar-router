@@ -141,6 +141,22 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "RouteNames"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": [
+                            {
+                              "string": "oracle"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "TotalRouted"
                             }
                           ]

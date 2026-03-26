@@ -115,6 +115,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "RouteNames"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": []
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "TotalRouted"
                             }
                           ]

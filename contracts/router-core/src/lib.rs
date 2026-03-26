@@ -23,6 +23,7 @@ use soroban_sdk::{
 pub enum DataKey {
     Admin,
     Route(String),    // name -> RouteEntry
+    RouteNames,
     Paused,
     TotalRouted,
 }
@@ -83,6 +84,7 @@ impl RouterCore {
             return Err(RouterError::AlreadyInitialized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::RouteNames, &Vec::<String>::new(&env));
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::TotalRouted, &0u64);
         Ok(())
@@ -126,6 +128,10 @@ impl RouterCore {
             updated_by: caller,
         };
         env.storage().instance().set(&DataKey::Route(name.clone()), &entry);
+
+        let mut route_names = Self::get_route_names(&env);
+        route_names.push_back(name.clone());
+        env.storage().instance().set(&DataKey::RouteNames, &route_names);
 
         env.events().publish(
             (Symbol::new(&env, "route_registered"),),
@@ -205,6 +211,17 @@ impl RouterCore {
         }
 
         env.storage().instance().remove(&DataKey::Route(name.clone()));
+
+        let route_names = Self::get_route_names(&env);
+        let mut updated_route_names = Vec::new(&env);
+        for route_name in route_names.iter() {
+            if route_name != name {
+                updated_route_names.push_back(route_name);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RouteNames, &updated_route_names);
 
         env.events().publish(
             (Symbol::new(&env, "route_removed"),),
@@ -420,15 +437,7 @@ impl RouterCore {
     /// # Returns
     /// A `Vec<String>` containing all registered route names.
     pub fn get_all_routes(env: Env) -> Vec<String> {
-        let mut routes = Vec::new(&env);
-        let mut iter = env.storage().instance().iter();
-        while let Some(kv) = iter.next() {
-            let (key, _) = kv.unwrap();
-            if let DataKey::Route(name) = key {
-                routes.append(name);
-            }
-        }
-        routes
+        Self::get_route_names(&env)
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -443,6 +452,13 @@ impl RouterCore {
             return Err(RouterError::Unauthorized);
         }
         Ok(())
+    }
+
+    fn get_route_names(env: &Env) -> Vec<String> {
+        env.storage()
+            .instance()
+            .get(&DataKey::RouteNames)
+            .unwrap_or(Vec::new(env))
     }
 }
 
@@ -600,11 +616,17 @@ mod tests {
         
         // Verify an event was emitted
         assert_eq!(events_after, events_before + 1);
+    }
+
+    #[test]
     fn test_resolve_unknown_route_fails() {
         let (env, _admin, client) = setup();
         let name = String::from_str(&env, "unknown");
         let result = client.try_resolve(&name);
         assert_eq!(result, Err(Ok(RouterError::RouteNotFound)));
+    }
+
+    #[test]
     fn test_get_all_routes_empty() {
         let (env, _, client) = setup();
         let routes: Vec<String> = client.get_all_routes();
