@@ -571,6 +571,43 @@ mod tests {
     }
 
     #[test]
+    fn test_set_min_delay_updates_value() {
+        let (env, admin, client) = setup();
+        client.set_min_delay(&admin, &7200);
+        assert_eq!(client.min_delay(), 7200);
+    }
+
+    #[test]
+    fn test_set_min_delay_zero_fails() {
+        let (env, admin, client) = setup();
+        let result = client.try_set_min_delay(&admin, &0);
+        assert_eq!(result, Err(Ok(TimelockError::InvalidDelay)));
+    }
+
+    #[test]
+    fn test_set_min_delay_unauthorized_fails() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let result = client.try_set_min_delay(&attacker, &7200);
+        assert_eq!(result, Err(Ok(TimelockError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_set_min_delay_does_not_affect_existing_ops() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle");
+        // Queue with current min_delay of 3600
+        let op_id = client.queue(&admin, &desc, &target, &3600);
+        // Raise min_delay to 7200 — op was already queued with delay=3600
+        client.set_min_delay(&admin, &7200);
+        // Advance past the original ETA
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+        // Execute must still succeed — the op was valid when queued
+        assert!(client.try_execute(&admin, &op_id).is_ok());
+    }
+
+    #[test]
     fn test_old_admin_locked_out_after_transfer() {
         let (env, admin, client) = setup();
         let new_admin = Address::generate(&env);

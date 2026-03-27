@@ -663,6 +663,43 @@ mod tests {
     }
 
     #[test]
+    fn test_update_route_while_paused_succeeds() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr1 = Address::generate(&env);
+        let addr2 = Address::generate(&env);
+        client.register_route(&admin, &name, &addr1);
+        client.set_route_paused(&admin, &name, &true);
+        client.update_route(&admin, &name, &addr2);
+        let entry = client.get_route(&name).unwrap();
+        assert_eq!(entry.address, addr2);
+        assert!(entry.paused); // still paused after update
+    }
+
+    #[test]
+    fn test_resolve_succeeds_after_unpause() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr);
+        client.set_route_paused(&admin, &name, &true);
+        client.set_route_paused(&admin, &name, &false);
+        assert_eq!(client.resolve(&name), addr);
+    }
+
+    #[test]
+    fn test_router_unpause_round_trip() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register_route(&admin, &name, &addr);
+        client.set_paused(&admin, &true);
+        assert_eq!(client.try_resolve(&name), Err(Ok(RouterError::RouterPaused)));
+        client.set_paused(&admin, &false);
+        assert_eq!(client.resolve(&name), addr);
+    }
+
+    #[test]
     fn test_get_all_routes_multiple() {
         let (env, admin, client) = setup();
         let oracle = String::from_str(&env, "oracle");

@@ -402,6 +402,39 @@ mod tests {
     }
 
     #[test]
+    fn test_get_latest_unknown_name_returns_not_found() {
+        let (env, _admin, client) = setup();
+        let name = String::from_str(&env, "unknown");
+        let result = client.try_get_latest(&name);
+        assert_eq!(result, Err(Ok(RegistryError::NotFound)));
+    }
+
+    #[test]
+    fn test_get_latest_returns_not_found_when_all_deprecated() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register(&admin, &name, &addr, &1);
+        client.deprecate(&admin, &name, &1);
+        let result = client.try_get_latest(&name);
+        assert_eq!(result, Err(Ok(RegistryError::NotFound)));
+    }
+
+    #[test]
+    fn test_get_latest_skips_multiple_deprecated_versions() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let (a1, a2, a3) = (Address::generate(&env), Address::generate(&env), Address::generate(&env));
+        client.register(&admin, &name, &a1, &1);
+        client.register(&admin, &name, &a2, &2);
+        client.register(&admin, &name, &a3, &3);
+        client.deprecate(&admin, &name, &3);
+        client.deprecate(&admin, &name, &2);
+        let latest = client.get_latest(&name);
+        assert_eq!(latest.version, 1);
+    }
+
+    #[test]
     fn test_duplicate_version_fails() {
         let (env, admin, client) = setup();
         let name = String::from_str(&env, "oracle");
