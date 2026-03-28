@@ -51,6 +51,7 @@ pub enum RegistryError {
     AlreadyRegistered = 5,
     AlreadyDeprecated = 6,
     InvalidVersion = 7,
+    VersionNotFound = 8,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -228,12 +229,15 @@ impl RouterRegistry {
     ) -> Result<(), RegistryError> {
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
+        Self::deprecate_one(&env, name, version)
+    }
 
+    fn deprecate_one(env: &Env, name: String, version: u32) -> Result<(), RegistryError> {
         let mut entry: ContractEntry = env
             .storage()
             .instance()
             .get(&DataKey::Entry(name.clone(), version))
-            .ok_or(RegistryError::NotFound)?;
+            .ok_or(RegistryError::VersionNotFound)?;
 
         if entry.deprecated {
             return Err(RegistryError::AlreadyDeprecated);
@@ -242,6 +246,25 @@ impl RouterRegistry {
         entry.deprecated = true;
         env.storage().instance().set(&DataKey::Entry(name, version), &entry);
         Ok(())
+    }
+
+    pub fn deprecate_many(
+        env: Env,
+        caller: Address,
+        entries: Vec<(String, u32)>,
+    ) -> Vec<Result<(), RegistryError>> {
+        caller.require_auth();
+        let mut results = Vec::new(&env);
+        if Self::require_admin(&env, &caller).is_err() {
+            for _ in entries.iter() {
+                results.push_back(Err(RegistryError::Unauthorized));
+            }
+            return results;
+        }
+        for (name, version) in entries.iter() {
+            results.push_back(Self::deprecate_one(&env, name, version));
+        }
+        results
     }
 
     /// Transfer admin to a new address.
@@ -332,7 +355,7 @@ impl RouterRegistry {
 mod tests {
     extern crate std;
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Events}, vec, Env, IntoVal, String, Val};
+    use soroban_sdk::{testutils::{Address as _, Events}, vec, Env, IntoVal, String};
 
     fn setup() -> (Env, Address, RouterRegistryClient<'static>) {
         let env = Env::default();
@@ -399,6 +422,16 @@ mod tests {
         // latest should now return v1
         let latest = client.get_latest(&name);
         assert_eq!(latest.version, 1);
+    }
+
+    #[test]
+    fn test_deprecate_nonexistent_version_returns_error() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register(&admin, &name, &addr, &1);
+        let result = client.try_deprecate(&admin, &name, &99);
+        assert_eq!(result, Err(Ok(RegistryError::VersionNotFound)));
     }
 
     #[test]
@@ -485,8 +518,9 @@ mod tests {
             event.1,
             vec![&env, Symbol::new(&env, "admin_transferred").into_val(&env)]
         );
-        let expected_data: Val = (admin, new_admin).into_val(&env);
-        assert_eq!(event.2, expected_data);
+        let (old, new): (Address, Address) = event.2.into_val(&env);
+        assert_eq!(old, admin);
+        assert_eq!(new, new_admin);
     }
 
     #[test]
@@ -532,5 +566,44 @@ mod tests {
         let name = String::from_str(&env, "nonexistent");
         let versions = client.versions(&name);
         assert!(versions.is_empty());
+    }
+
+    #[test]
+    fn test_deprecate_many_all_succeed() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let (a1, a2, a3) = (Address::generate(&env), Address::generate(&env), Address::generate(&env));
+        client.register(&admin, &name, &a1, &1);
+        client.register(&admin, &name, &a2, &2);
+        client.register(&admin, &name, &a3, &3);
+
+        let entries = vec![&env,
+            (name.clone(), 1u32),
+            (name.clone(), 2u32),
+            (name.clone(), 3u32),
+        ];
+        let results = client.deprecate_many(&admin, &entries);
+        assert_eq!(results.len(), 3);
+        for r in results.iter() {
+            assert_eq!(r, Ok(()));
+        }
+    }
+
+    #[test]
+    fn test_deprecate_many_partial_errors() {
+        let (env, admin, client) = setup();
+        let name = String::from_str(&env, "oracle");
+        let addr = Address::generate(&env);
+        client.register(&admin, &name, &addr, &1);
+
+        let entries = vec![&env,
+            (name.clone(), 1u32),  // ok
+            (name.clone(), 99u32), // VersionNotFound
+            (name.clone(), 1u32),  // AlreadyDeprecated
+        ];
+        let results = client.deprecate_many(&admin, &entries);
+        assert_eq!(results.get(0).unwrap(), Ok(()));
+        assert_eq!(results.get(1).unwrap(), Err(RegistryError::VersionNotFound));
+        assert_eq!(results.get(2).unwrap(), Err(RegistryError::AlreadyDeprecated));
     }
 }

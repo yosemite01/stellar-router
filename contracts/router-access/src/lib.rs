@@ -11,7 +11,7 @@
 //! - Check role membership on-chain
 //! - Whitelist/blacklist individual callers
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String, Symbol, Vec};
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
@@ -21,6 +21,8 @@ pub enum DataKey {
     HasRole(String, Address),   // (role, address) -> bool
     RoleAdmin(String),          // role -> Address who manages it
     Blacklisted(Address),
+    RoleMembers(String),        // role -> Vec<Address>
+    AddressRoles(Address),      // address -> Vec<String>
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -104,14 +106,25 @@ impl RouterAccess {
         env.storage()
             .instance()
             .set(&DataKey::HasRole(role.clone(), target.clone()), &true);
+
+        let mut members: Vec<Address> = env.storage().instance()
+            .get(&DataKey::RoleMembers(role.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        members.push_back(target.clone());
+        env.storage().instance().set(&DataKey::RoleMembers(role.clone()), &members);
+
+        let mut roles: Vec<String> = env.storage().instance()
+            .get(&DataKey::AddressRoles(target.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        roles.push_back(role.clone());
+        env.storage().instance().set(&DataKey::AddressRoles(target.clone()), &roles);
+
         env.events().publish(
             (Symbol::new(&env, "role_granted"),),
             (role, target),
         );
         Ok(())
     }
-
-    /// Revoke a role from an address.
     ///
     /// Removes `role` from `target`. The `target` must currently hold the role.
     /// The `caller` must be either the super-admin or the designated admin for `role`.
@@ -144,6 +157,23 @@ impl RouterAccess {
         env.storage()
             .instance()
             .remove(&DataKey::HasRole(role.clone(), target.clone()));
+
+        let mut members: Vec<Address> = env.storage().instance()
+            .get(&DataKey::RoleMembers(role.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        if let Some(i) = members.iter().position(|a| a == target) {
+            members.remove(i as u32);
+        }
+        env.storage().instance().set(&DataKey::RoleMembers(role.clone()), &members);
+
+        let mut roles: Vec<String> = env.storage().instance()
+            .get(&DataKey::AddressRoles(target.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        if let Some(i) = roles.iter().position(|r| r == role) {
+            roles.remove(i as u32);
+        }
+        env.storage().instance().set(&DataKey::AddressRoles(target.clone()), &roles);
+
         env.events().publish(
             (Symbol::new(&env, "role_revoked"),),
             (role, target),
@@ -276,6 +306,20 @@ impl RouterAccess {
         Self::is_blacklisted_internal(&env, &target)
     }
 
+    /// Return all addresses currently holding `role`.
+    pub fn get_role_members(env: Env, role: String) -> Vec<Address> {
+        env.storage().instance()
+            .get(&DataKey::RoleMembers(role))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return all roles currently held by `addr`.
+    pub fn get_roles_for_address(env: Env, addr: Address) -> Vec<String> {
+        env.storage().instance()
+            .get(&DataKey::AddressRoles(addr))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     /// Transfer super-admin to a new address.
     ///
     /// Replaces the current super-admin with `new_admin`. The `current` address
@@ -385,7 +429,6 @@ mod tests {
         Env,
         IntoVal,
         String,
-        Val,
     };
 
     fn setup() -> (Env, Address, RouterAccessClient<'static>) {
@@ -418,8 +461,9 @@ mod tests {
         let event = env.events().all().last().unwrap().clone();
         assert_eq!(event.0, client.address);
         assert_eq!(event.1, vec![&env, Symbol::new(&env, "role_granted").into_val(&env)]);
-        let expected_data: Val = (role, user).into_val(&env);
-        assert_eq!(event.2, expected_data);
+        let (got_role, got_user): (String, Address) = event.2.into_val(&env);
+        assert_eq!(got_role, role);
+        assert_eq!(got_user, user);
     }
 
     #[test]
@@ -444,8 +488,9 @@ mod tests {
         let event = env.events().all().last().unwrap().clone();
         assert_eq!(event.0, client.address);
         assert_eq!(event.1, vec![&env, Symbol::new(&env, "role_revoked").into_val(&env)]);
-        let expected_data: Val = (role, user).into_val(&env);
-        assert_eq!(event.2, expected_data);
+        let (got_role, got_user): (String, Address) = event.2.into_val(&env);
+        assert_eq!(got_role, role);
+        assert_eq!(got_user, user);
     }
 
     #[test]
@@ -481,8 +526,8 @@ mod tests {
             event.1,
             vec![&env, Symbol::new(&env, "address_blacklisted").into_val(&env)]
         );
-        let expected_data: Val = user.into_val(&env);
-        assert_eq!(event.2, expected_data);
+        let got_user: Address = event.2.into_val(&env);
+        assert_eq!(got_user, user);
     }
 
     #[test]
@@ -534,8 +579,9 @@ mod tests {
             event.1,
             vec![&env, Symbol::new(&env, "admin_transferred").into_val(&env)]
         );
-        let expected_data: Val = (admin, new_admin).into_val(&env);
-        assert_eq!(event.2, expected_data);
+        let (old, new): (Address, Address) = event.2.into_val(&env);
+        assert_eq!(old, admin);
+        assert_eq!(new, new_admin);
     }
 
     #[test]
@@ -632,7 +678,51 @@ mod tests {
             event.1,
             vec![&env, Symbol::new(&env, "address_unblacklisted").into_val(&env)]
         );
-        let expected_data: Val = user.into_val(&env);
-        assert_eq!(event.2, expected_data);
+        let got_user: Address = event.2.into_val(&env);
+        assert_eq!(got_user, user);
+    }
+
+    #[test]
+    fn test_get_role_members() {
+        let (env, admin, client) = setup();
+        let role = String::from_str(&env, "operator");
+        let u1 = Address::generate(&env);
+        let u2 = Address::generate(&env);
+
+        assert!(client.get_role_members(&role).is_empty());
+
+        client.grant_role(&admin, &role, &u1);
+        client.grant_role(&admin, &role, &u2);
+        let members = client.get_role_members(&role);
+        assert_eq!(members.len(), 2);
+        assert!(members.contains(&u1));
+        assert!(members.contains(&u2));
+
+        client.revoke_role(&admin, &role, &u1);
+        let members = client.get_role_members(&role);
+        assert_eq!(members.len(), 1);
+        assert!(members.contains(&u2));
+    }
+
+    #[test]
+    fn test_get_roles_for_address() {
+        let (env, admin, client) = setup();
+        let r1 = String::from_str(&env, "operator");
+        let r2 = String::from_str(&env, "auditor");
+        let user = Address::generate(&env);
+
+        assert!(client.get_roles_for_address(&user).is_empty());
+
+        client.grant_role(&admin, &r1, &user);
+        client.grant_role(&admin, &r2, &user);
+        let roles = client.get_roles_for_address(&user);
+        assert_eq!(roles.len(), 2);
+        assert!(roles.contains(&r1));
+        assert!(roles.contains(&r2));
+
+        client.revoke_role(&admin, &r1, &user);
+        let roles = client.get_roles_for_address(&user);
+        assert_eq!(roles.len(), 1);
+        assert!(roles.contains(&r2));
     }
 }
