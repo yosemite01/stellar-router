@@ -23,6 +23,7 @@ pub enum DataKey {
     GlobalEnabled,
     TotalCalls,
     CircuitBreaker(String),     // route_name -> CircuitBreakerState
+    CallLog(String),            // route_name -> Vec<CallLogEntry>
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -49,6 +50,8 @@ pub struct RouteConfig {
     pub failure_threshold: u32,
     /// Circuit breaker recovery window in seconds
     pub recovery_window_seconds: u64,
+    /// Max call log entries to keep (0 = disabled)
+    pub log_retention: u32,
 }
 
 #[contracttype]
@@ -60,6 +63,17 @@ pub struct CircuitBreakerState {
     pub opened_at: u64,
     /// Whether circuit is currently open
     pub is_open: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallLogEntry {
+    /// The caller address
+    pub caller: Address,
+    /// Timestamp of the call
+    pub timestamp: u64,
+    /// Whether the call succeeded
+    pub success: bool,
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -123,6 +137,7 @@ impl RouterMiddleware {
     /// * `enabled` - Whether this route should be enabled.
     /// * `failure_threshold` - Circuit breaker failure threshold (0 = disabled).
     /// * `recovery_window_seconds` - Circuit breaker recovery window in seconds.
+    /// * `log_retention` - Maximum call log entries to keep (0 = disabled).
     ///
     /// # Returns
     /// `Ok(())` on success.
@@ -140,6 +155,7 @@ impl RouterMiddleware {
         enabled: bool,
         failure_threshold: u32,
         recovery_window_seconds: u64,
+        log_retention: u32,
     ) -> Result<(), MiddlewareError> {
         caller.require_auth();
         Self::require_admin(&env, &caller)?;
@@ -154,6 +170,7 @@ impl RouterMiddleware {
             enabled,
             failure_threshold,
             recovery_window_seconds,
+            log_retention,
         };
         env.storage().instance().set(&DataKey::RouteConfig(route), &config);
         Ok(())
@@ -291,6 +308,39 @@ impl RouterMiddleware {
             (caller.clone(), route.clone(), success),
         );
 
+        // Log the call if retention is enabled
+        if let Some(config) = env
+            .storage()
+            .instance()
+            .get::<DataKey, RouteConfig>(&DataKey::RouteConfig(route.clone()))
+        {
+            if config.log_retention > 0 {
+                let mut log: Vec<CallLogEntry> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::CallLog(route.clone()))
+                    .unwrap_or(Vec::new(&env));
+
+                let entry = CallLogEntry {
+                    caller: caller.clone(),
+                    timestamp: env.ledger().timestamp(),
+                    success,
+                };
+                log.push_back(entry);
+
+                if log.len() > config.log_retention {
+                    // Remove oldest entry (ring buffer)
+                    let mut new_log = Vec::new(&env);
+                    for i in 1..log.len() {
+                        new_log.push_back(log.get(i).unwrap());
+                    }
+                    log = new_log;
+                }
+
+                env.storage().instance().set(&DataKey::CallLog(route), &log);
+            }
+        }
+
         if !success {
             if let Some(config) = env
                 .storage()
@@ -368,7 +418,23 @@ impl RouterMiddleware {
     pub fn total_calls(env: Env) -> u64 {
         env.storage().instance().get(&DataKey::TotalCalls).unwrap_or(0)
     }
-
+    /// Get the call log for a route.
+    ///
+    /// Returns the list of recent call log entries for `route`, up to the
+    /// configured retention limit. Entries are in chronological order (oldest first).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `route` - The route name to retrieve logs for.
+    ///
+    /// # Returns
+    /// A [`Vec<CallLogEntry>`] of call log entries.
+    pub fn get_call_log(env: Env, route: String) -> Vec<CallLogEntry> {
+        env.storage()
+            .instance()
+            .get(&DataKey::CallLog(route))
+            .unwrap_or(Vec::new(&env))
+    }
     /// Get rate limit state for a caller on a specific route.
     ///
     /// Returns the current [`RateLimitState`] for `caller` on `route`, which includes the
@@ -524,7 +590,7 @@ mod tests {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
         // max 2 calls per 60s window
-        client.configure_route(&admin, &route, &2, &60, &true, &0, &0);
+        client.configure_route(&admin, &route, &2, &60, &true, &0, &0, &0);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -537,7 +603,7 @@ mod tests {
     fn test_rate_limit_resets_after_window() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &1, &60, &true, &0, &0);
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
 
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);
@@ -551,7 +617,7 @@ mod tests {
     fn test_disabled_route_blocked() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &0, &0, &false, &0, &0);
+        client.configure_route(&admin, &route, &0, &0, &false, &0, &0, &0);
         let caller = Address::generate(&env);
         let result = client.try_pre_call(&caller, &route);
         assert_eq!(result, Err(Ok(MiddlewareError::RouteDisabled)));
@@ -572,7 +638,7 @@ mod tests {
         let (env, _admin, client) = setup();
         let attacker = Address::generate(&env);
         let route = String::from_str(&env, "oracle/get_price");
-        let result = client.try_configure_route(&attacker, &route, &10, &60, &true, &0, &0);
+        let result = client.try_configure_route(&attacker, &route, &10, &60, &true, &0, &0, &0);
         assert_eq!(result, Err(Ok(MiddlewareError::Unauthorized)));
     }
 
@@ -593,8 +659,8 @@ mod tests {
         let route_a = String::from_str(&env, "oracle/price");
         let route_b = String::from_str(&env, "vault/deposit");
         // route_a: 10 calls per minute, route_b: 5 calls per minute
-        client.configure_route(&admin, &route_a, &10, &60, &true, &0, &0);
-        client.configure_route(&admin, &route_b, &5, &60, &true, &0, &0);
+        client.configure_route(&admin, &route_a, &10, &60, &true, &0, &0, &0);
+        client.configure_route(&admin, &route_b, &5, &60, &true, &0, &0, &0);
 
         let caller = Address::generate(&env);
         // Make 4 calls on route_a — drains route_a counter to 4
@@ -619,7 +685,7 @@ mod tests {
     fn test_total_calls_not_incremented_on_rejected_pre_call() {
         let (env, admin, client) = setup();
         let route = String::from_str(&env, "oracle/get_price");
-        client.configure_route(&admin, &route, &1, &60, &true);
+        client.configure_route(&admin, &route, &1, &60, &true, &0, &0, &0);
         
         let caller = Address::generate(&env);
         client.pre_call(&caller, &route);                     // passes, total = 1
@@ -661,13 +727,13 @@ mod tests {
 
         // old admin should no longer be able to configure routes
         let route = String::from_str(&env, "oracle/get_price");
-        let result = client.try_configure_route(&admin, &route, &10, &60, &true, &0, &0);
+        let result = client.try_configure_route(&admin, &route, &10, &60, &true, &0, &0, &0);
         assert_eq!(result, Err(Ok(MiddlewareError::Unauthorized)));
 
         // new admin should be able to configure routes
         assert!(
             client
-                .try_configure_route(&new_admin, &route, &10, &60, &true, &0, &0)
+                .try_configure_route(&new_admin, &route, &10, &60, &true, &0, &0, &0)
                 .is_ok()
         );
     }

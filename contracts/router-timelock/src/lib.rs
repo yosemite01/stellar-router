@@ -620,6 +620,29 @@ impl RouterTimelock {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Get all pending operations.
+    ///
+    /// Returns a list of all operations that are neither executed nor cancelled,
+    /// in ID order (ascending).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// A [`Vec<TimelockOp>`] of pending operations.
+    pub fn get_pending_ops(env: Env) -> Vec<TimelockOp> {
+        let next_id = Self::next_op_id(&env);
+        let mut pending = Vec::new(&env);
+        for id in 0..next_id {
+            if let Some(op) = env.storage().instance().get(&DataKey::Operation(id)) {
+                if !op.executed && !op.cancelled {
+                    pending.push_back(op);
+                }
+            }
+        }
+        pending
+    }
+
     /// Get the minimum delay.
     ///
     /// # Arguments

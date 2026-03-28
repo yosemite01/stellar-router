@@ -237,7 +237,7 @@ impl RouterRegistry {
             let mut i = len;
             while i > 0 {
                 i -= 1;
-                let v = versions.get(i).unwrap();
+                let v = versions.get(i).ok_or(RegistryError::NotFound)?;
                 let entry: ContractEntry = env
                     .storage()
                     .instance()
@@ -257,7 +257,7 @@ impl RouterRegistry {
         let mut i = len;
         while i > 0 {
             i -= 1;
-            let v = versions.get(i).unwrap();
+            let v = versions.get(i).ok_or(RegistryError::NotFound)?;
             let entry: ContractEntry = env
                 .storage()
                 .instance()
@@ -397,6 +397,28 @@ impl RouterRegistry {
     /// has no registered versions.
     pub fn versions(env: Env, name: String) -> Vec<u32> {
         Self::get_versions_list(&env, &name)
+    }
+
+    /// Get all contract entries for a name.
+    ///
+    /// Returns all [`ContractEntry`] structs for `name`, including deprecated ones,
+    /// in version order (ascending).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `name` - The human-readable name of the contract.
+    ///
+    /// # Returns
+    /// A [`Vec<ContractEntry>`] of all entries for `name`.
+    pub fn get_all_versions(env: Env, name: String) -> Vec<ContractEntry> {
+        let versions = Self::get_versions_list(&env, &name);
+        let mut entries = Vec::new(&env);
+        for v in versions.iter() {
+            if let Some(entry) = env.storage().instance().get(&DataKey::Entry(name.clone(), v)) {
+                entries.push_back(entry);
+            }
+        }
+        entries
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
