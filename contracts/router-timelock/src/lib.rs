@@ -153,6 +153,11 @@ impl RouterTimelock {
         env.storage().instance().set(&DataKey::Operation(op_id), &op);
         env.storage().instance().set(&DataKey::NextOpId, &(op_id + 1));
 
+        env.events().publish(
+            (Symbol::new(&env, "op_queued"),),
+            (op_id, target, eta),
+        );
+
         Ok(op_id)
     }
 
@@ -199,6 +204,11 @@ impl RouterTimelock {
         op.executed = true;
         env.storage().instance().set(&DataKey::Operation(op_id), &op);
 
+        env.events().publish(
+            (Symbol::new(&env, "op_executed"),),
+            op_id,
+        );
+
         Ok(())
     }
 
@@ -240,6 +250,11 @@ impl RouterTimelock {
 
         op.cancelled = true;
         env.storage().instance().set(&DataKey::Operation(op_id), &op);
+
+        env.events().publish(
+            (Symbol::new(&env, "op_cancelled"),),
+            op_id,
+        );
 
         Ok(())
     }
@@ -406,7 +421,7 @@ impl RouterTimelock {
 mod tests {
     extern crate std;
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Ledger}, Env, String};
+    use soroban_sdk::{testutils::{Address as _, Ledger, Events}, Env, String, Symbol, IntoVal};
 
     fn setup() -> (Env, Address, RouterTimelockClient<'static>) {
         let env = Env::default();
@@ -620,5 +635,66 @@ mod tests {
         // new admin should be able to update min delay
         assert!(client.try_set_min_delay(&new_admin, &7200).is_ok());
         assert_eq!(client.min_delay(), 7200);
+    }
+
+    #[test]
+    fn test_queue_emits_op_queued_event() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle");
+        
+        let events_before = env.events().all().len();
+        let op_id = client.queue(&admin, &desc, &target, &3600);
+        let events_after = env.events().all().len();
+        
+        assert_eq!(events_after, events_before + 1);
+        let event = env.events().all().last().unwrap().clone();
+        assert_eq!(event.0, client.address);
+        assert_eq!(
+            event.1,
+            soroban_sdk::vec![&env, Symbol::new(&env, "op_queued").into_val(&env)]
+        );
+    }
+
+    #[test]
+    fn test_execute_emits_op_executed_event() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle");
+        let op_id = client.queue(&admin, &desc, &target, &3600);
+        
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+        
+        let events_before = env.events().all().len();
+        client.execute(&admin, &op_id);
+        let events_after = env.events().all().len();
+        
+        assert_eq!(events_after, events_before + 1);
+        let event = env.events().all().last().unwrap().clone();
+        assert_eq!(event.0, client.address);
+        assert_eq!(
+            event.1,
+            soroban_sdk::vec![&env, Symbol::new(&env, "op_executed").into_val(&env)]
+        );
+    }
+
+    #[test]
+    fn test_cancel_emits_op_cancelled_event() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "upgrade oracle");
+        let op_id = client.queue(&admin, &desc, &target, &3600);
+        
+        let events_before = env.events().all().len();
+        client.cancel(&admin, &op_id);
+        let events_after = env.events().all().len();
+        
+        assert_eq!(events_after, events_before + 1);
+        let event = env.events().all().last().unwrap().clone();
+        assert_eq!(event.0, client.address);
+        assert_eq!(
+            event.1,
+            soroban_sdk::vec![&env, Symbol::new(&env, "op_cancelled").into_val(&env)]
+        );
     }
 }
