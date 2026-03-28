@@ -37,6 +37,15 @@ pub struct CallDescriptor {
     pub function: Symbol,
     /// Whether failure of this call should abort the whole batch
     pub required: bool,
+    /// Optional CPU instruction budget for this call.
+    ///
+    /// NOTE: Soroban's host does not expose a per-call instruction counter to
+    /// guest contracts at runtime. This field is reserved for future use when
+    /// the host surfaces budget metering to contracts. Currently, any value set
+    /// here is stored and reflected in events/summary but cannot be enforced
+    /// mid-call. Budget overruns at the transaction level are still caught by
+    /// the host and will cause the entire transaction to fail.
+    pub instruction_budget: Option<u64>,
 }
 
 /// Result of a single call in a batch.
@@ -55,6 +64,13 @@ pub struct BatchSummary {
     pub total: u32,
     pub succeeded: u32,
     pub failed: u32,
+    /// Number of calls that failed while an `instruction_budget` was set.
+    ///
+    /// Because the Soroban host does not currently expose a per-call CPU
+    /// counter to guest contracts, this counts calls that *failed* and had a
+    /// budget specified — a conservative proxy until host metering is
+    /// surfaced to contracts.
+    pub budget_exceeded_count: u32,
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -160,6 +176,7 @@ impl RouterMulticall {
 
         let mut succeeded = 0u32;
         let mut failed = 0u32;
+        let mut budget_exceeded_count = 0u32;
         let total = calls.len();
 
         for call in calls.iter() {
@@ -173,6 +190,13 @@ impl RouterMulticall {
                 succeeded += 1;
             } else {
                 failed += 1;
+                // The host does not expose a per-call CPU counter to guest contracts.
+                // We conservatively count any failed call that had a budget set as a
+                // potential budget overrun. This will be tightened once the host
+                // surfaces budget metering to contracts.
+                if call.instruction_budget.is_some() {
+                    budget_exceeded_count += 1;
+                }
                 if call.required {
                     return Err(MulticallError::RequiredCallFailed);
                 }
@@ -196,6 +220,7 @@ impl RouterMulticall {
             total,
             succeeded,
             failed,
+            budget_exceeded_count,
         })
     }
 
@@ -368,6 +393,7 @@ mod tests {
                 target: Address::generate(&env),
                 function: Symbol::new(&env, "ping"),
                 required: false,
+                instruction_budget: None,
             });
         }
         let result = client.try_execute_batch(&caller, &calls);
@@ -422,17 +448,20 @@ mod tests {
             target: mock_id.clone(),
             function: Symbol::new(&env, "success"),
             required: true,
+            instruction_budget: None,
         });
         calls.push_back(CallDescriptor {
             target: mock_id.clone(),
             function: Symbol::new(&env, "success"),
             required: false,
+            instruction_budget: None,
         });
 
         let summary = client.execute_batch(&caller, &calls);
         assert_eq!(summary.total, 2);
         assert_eq!(summary.succeeded, 2);
         assert_eq!(summary.failed, 0);
+        assert_eq!(summary.budget_exceeded_count, 0);
         assert_eq!(client.total_batches(), 1);
     }
 
@@ -448,18 +477,21 @@ mod tests {
             target: mock_id.clone(),
             function: Symbol::new(&env, "success"),
             required: true,
+            instruction_budget: None,
         });
         // Failing optional call
         calls.push_back(CallDescriptor {
             target: mock_id.clone(),
             function: Symbol::new(&env, "fail"),
             required: false,
+            instruction_budget: None,
         });
         // Successful optional call
         calls.push_back(CallDescriptor {
             target: mock_id.clone(),
             function: Symbol::new(&env, "success"),
             required: false,
+            instruction_budget: None,
         });
 
         let summary = client.execute_batch(&caller, &calls);
@@ -481,18 +513,21 @@ mod tests {
             target: mock_id.clone(),
             function: Symbol::new(&env, "success"),
             required: false,
+            instruction_budget: None,
         });
         // Failing required call
         calls.push_back(CallDescriptor {
             target: mock_id.clone(),
             function: Symbol::new(&env, "fail"),
             required: true,
+            instruction_budget: None,
         });
         // This should not even reach
         calls.push_back(CallDescriptor {
             target: mock_id.clone(),
             function: Symbol::new(&env, "success"),
             required: false,
+            instruction_budget: None,
         });
 
         let result = client.try_execute_batch(&caller, &calls);
@@ -538,5 +573,41 @@ mod tests {
         // new admin should be able to update config
         assert!(client.try_set_max_batch_size(&new_admin, &5).is_ok());
         assert_eq!(client.max_batch_size(), 5);
+    }
+
+    #[test]
+    fn test_budget_exceeded_count_increments_on_budgeted_failure() {
+        let (env, _admin, client) = setup();
+        let mock_id = env.register_contract(None, MockContract);
+        let caller = Address::generate(&env);
+
+        let mut calls = Vec::new(&env);
+        // Failing call WITH a budget set — should count as budget_exceeded
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: false,
+            instruction_budget: Some(500_000),
+        });
+        // Failing call WITHOUT a budget set — should NOT count
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "fail"),
+            required: false,
+            instruction_budget: None,
+        });
+        // Successful call with a budget — should NOT count
+        calls.push_back(CallDescriptor {
+            target: mock_id.clone(),
+            function: Symbol::new(&env, "success"),
+            required: false,
+            instruction_budget: Some(500_000),
+        });
+
+        let summary = client.execute_batch(&caller, &calls);
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(summary.failed, 2);
+        assert_eq!(summary.budget_exceeded_count, 1);
     }
 }
