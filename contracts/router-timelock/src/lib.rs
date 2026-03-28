@@ -547,6 +547,30 @@ mod tests {
     }
 
     #[test]
+    fn test_cancel_all_unauthorized_fails() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        let result = client.try_cancel_all(&attacker);
+        assert_eq!(result, Err(Ok(TimelockError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_cancel_all_returns_correct_count_with_mixed_states() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let desc = String::from_str(&env, "op");
+        for _ in 0..4 {
+            client.queue(&admin, &desc, &target, &3600);
+        }
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+        client.execute(&admin, &0);
+        client.cancel(&admin, &1);
+        // ops 2 and 3 are still pending → expect count = 2
+        let count = client.cancel_all(&admin);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
     fn test_admin_getter() {
         let (env, admin, client) = setup();
         let retrieved_admin = client.admin();
